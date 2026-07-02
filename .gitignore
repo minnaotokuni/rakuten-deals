@@ -5,3 +5,5 @@ __pycache__/
 posted_log.json
 video_topics_log.json
 video_scripts/
+trend_posted_log.json
+trend_videos/
