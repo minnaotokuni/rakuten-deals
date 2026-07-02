@@ -63,8 +63,16 @@ PLANNER_PROMPT = """あなたはXで数万リポストを狙う短尺AI動画の
 # 今日の日本のGoogle検索トレンド（味付け用・使わなくてよい）
 {trends}
 
+# 過去投稿の実績フィードバック（最重要の判断材料）
+{feedback}
+
+ヒット企画がある場合は、同じ主役キャラ・同じ世界観の「別エピソード」を作ること。
+続き物になるとフォローする理由が生まれる。元プロンプトの主役の見た目・世界観の
+記述をできるだけ再利用して、シリーズとしての一貫性を保て。
+ただしエピソードの中身（やっている事・オチ）は毎回変えること。
+
 # タスク
-上の鉄板フォーマットで8秒動画の企画を1本作る。
+上の鉄板フォーマット（＋実績フィードバック）で8秒動画の企画を1本作る。
 - トレンドの中に「面白く絡められる話題」があれば絡める（例: 花火大会がトレンド→
   カピバラ一家が浴衣で花火を見ている）。無理やり絡めるくらいなら無視して純粋に面白い企画にする
 - 実在の人物・芸能人は絶対に出さない。事件・事故・災害も扱わない
@@ -73,6 +81,7 @@ PLANNER_PROMPT = """あなたはXで数万リポストを狙う短尺AI動画の
 # 出力形式（JSONのみ。コードブロック記号や説明は一切不要）
 {{
   "chosen_trend": "絡めたトレンド語（絡めない場合は空文字）",
+  "series": "続編を作った場合は元企画の一言説明をそのまま書く。新規企画なら空文字",
   "concept": "企画の一言説明（日本語）",
   "video_prompt": "動画生成AIへの英語プロンプト。①主役と状況 ②具体的な動作の流れ（8秒で起承転結） ③カメラワーク（handheld smartphone vlog style 等） ④環境音・効果音 を必ず含める。photorealistic",
   "tweet": "投稿文。状況を一言でツッコむ日本語（例:『温泉旅館の女将、カピバラだった』）。説明しすぎない。ハッシュタグは #AI動画 と、トレンドを絡めた場合のみそのタグ。全体80字以内"
@@ -100,28 +109,112 @@ def fetch_trends(limit: int = 10) -> list[dict]:
     return trends
 
 
-def load_posted_trends() -> list[str]:
+def load_log() -> list[dict]:
     if TREND_LOG.exists():
-        return [e["trend"] for e in json.loads(TREND_LOG.read_text())]
+        return json.loads(TREND_LOG.read_text())
     return []
 
 
-def plan_video(trends: list[dict]) -> dict:
-    """Geminiにトレンド一覧を渡し、企画JSONを受け取る。"""
+def save_log(entries: list[dict]) -> None:
+    TREND_LOG.write_text(json.dumps(entries, ensure_ascii=False, indent=1))
+
+
+def load_posted_trends() -> list[str]:
+    return [e["trend"] for e in load_log() if e.get("trend")]
+
+
+def engagement_score(m: dict) -> float:
+    """拡散に直結する指標を重めに評価した総合スコア。"""
+    return (
+        m.get("retweet_count", 0) * 5.0
+        + m.get("quote_count", 0) * 5.0
+        + m.get("reply_count", 0) * 4.0
+        + m.get("like_count", 0) * 3.0
+        + m.get("bookmark_count", 0) * 3.0
+        + m.get("impression_count", 0) * 0.01
+    )
+
+
+def update_engagement() -> list[dict]:
+    """過去投稿のメトリクスを1回のAPI呼び出しで回収してログに書き戻す。
+
+    X Freeプランは読み取り回数が月100回程度と少ないため、
+    実行毎に最大100件をまとめて1リクエストで取る。
+    """
+    entries = load_log()
+    targets = [e for e in entries if e.get("tweet_id")][-100:]
+    if not targets:
+        return entries
+    client = tweepy.Client(
+        consumer_key=os.environ["X_API_KEY"],
+        consumer_secret=os.environ["X_API_SECRET"],
+        access_token=os.environ["X_ACCESS_TOKEN"],
+        access_token_secret=os.environ["X_ACCESS_TOKEN_SECRET"],
+    )
+    try:
+        resp = client.get_tweets(
+            [e["tweet_id"] for e in targets],
+            tweet_fields=["public_metrics"],
+            user_auth=True,
+        )
+    except Exception as e:
+        print(f"[WARN] engagement fetch failed: {e}")
+        return entries
+    by_id = {str(t.id): t.public_metrics for t in (resp.data or [])}
+    for e in entries:
+        m = by_id.get(str(e.get("tweet_id")))
+        if m:
+            e["metrics"] = m
+            e["score"] = round(engagement_score(m), 2)
+    save_log(entries)
+    return entries
+
+
+def build_feedback(entries: list[dict]) -> str:
+    """ヒット/不発の実績をGeminiへのフィードバック文にする。
+
+    投稿から6時間未満のものはまだ数字が育っていないので評価対象外。
+    """
+    cutoff = datetime.now().timestamp() - 6 * 3600
+    evaluated = [
+        e for e in entries
+        if e.get("score") is not None
+        and datetime.fromisoformat(e["posted_at"]).timestamp() < cutoff
+    ]
+    if not evaluated:
+        return "（まだ実績データなし。鉄板フォーマットから自由に企画してよい）"
+    evaluated.sort(key=lambda e: e["score"], reverse=True)
+    lines = []
+    hits = [e for e in evaluated if e["score"] >= 10][:3]
+    flops = [e for e in evaluated if e["score"] < 1][-3:]
+    if hits:
+        lines.append("## ヒットした企画（この世界観の続編・別エピソードを最優先で作れ）")
+        for e in hits:
+            lines.append(f"- 「{e['concept']}」 score={e['score']}")
+            if e.get("video_prompt"):
+                lines.append(f"  元プロンプト: {e['video_prompt'][:200]}")
+    if flops:
+        lines.append("## 反応が無かった企画（似た方向は避けろ）")
+        for e in flops:
+            lines.append(f"- 「{e['concept']}」")
+    return "\n".join(lines) if lines else "（まだ明確なヒットなし。新しい切り口を試せ）"
+
+
+def plan_video(trends: list[dict], feedback: str) -> dict:
+    """Geminiにトレンド一覧と実績フィードバックを渡し、企画JSONを受け取る。"""
     posted = set(load_posted_trends())
     fresh = [t for t in trends if t["title"] not in posted]
     trends_text = "\n".join(
         f"- {t['title']}（検索数{t['traffic']}）: " + " / ".join(t["news"])
         for t in (fresh or trends)
     )
+    prompt = PLANNER_PROMPT.format(trends=trends_text, feedback=feedback)
     resp = None
     for attempt in range(5):
         resp = requests.post(
             f"{GEMINI_URL}?key={os.environ['GEMINI_API_KEY']}",
             json={
-                "contents": [
-                    {"parts": [{"text": PLANNER_PROMPT.format(trends=trends_text)}]}
-                ],
+                "contents": [{"parts": [{"text": prompt}]}],
                 "generationConfig": {"temperature": 0.9},
             },
             timeout=60,
@@ -237,22 +330,27 @@ def post_to_x(video_path: Path, tweet_text: str) -> str:
 
 
 def log_trend(plan: dict, tweet_id: str) -> None:
-    entries = json.loads(TREND_LOG.read_text()) if TREND_LOG.exists() else []
+    entries = load_log()
     entries.append({
         "trend": plan.get("chosen_trend", ""),
         "concept": plan.get("concept", ""),
+        "series": plan.get("series", ""),
+        "video_prompt": plan.get("video_prompt", ""),
         "tweet_id": tweet_id,
         "posted_at": datetime.now().isoformat(timespec="seconds"),
     })
-    TREND_LOG.write_text(json.dumps(entries, ensure_ascii=False, indent=1))
+    save_log(entries)
 
 
 def main() -> None:
     dry_run = "--dry-run" in sys.argv
     trends = fetch_trends()
     print("[trend] top trends:", ", ".join(t["title"] for t in trends[:5]))
-    plan = plan_video(trends)
-    print(f"[plan] trend: {plan.get('chosen_trend')} (fallback={plan.get('fallback')})")
+    entries = update_engagement()
+    feedback = build_feedback(entries)
+    print(f"[feedback]\n{feedback}")
+    plan = plan_video(trends, feedback)
+    print(f"[plan] trend: {plan.get('chosen_trend') or '(なし)'} series: {plan.get('series') or '(新規)'}")
     print(f"[plan] concept: {plan.get('concept')}")
     print(f"[plan] tweet: {plan.get('tweet')}")
     prompt = plan.get("video_prompt") or plan.get("kling_prompt")
