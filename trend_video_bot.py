@@ -1,11 +1,15 @@
 """トレンド連動Kling動画ボット。
 
 Googleトレンド(日本)から今バズっている話題を取得し、
-Gemini が「映像映えする企画」を選定して Kling 用プロンプトを作成、
-fal AI 経由の Kling で高品質AI動画を生成して X に投稿する。
+Gemini が「映像映えする企画」を選定して動画プロンプトを作成、
+fal AI 経由の text-to-video で高品質AI動画を生成して X に投稿する。
 
 実在の人物がトレンドの場合はスキップする（ディープフェイク回避）。
-コスト: Kling v2.5 Turbo Pro 5秒 ≒ $0.35/本。1日1本 ≒ 月$10前後。
+
+モデル: Veo 3.1 Lite（メイン） / Kling 2.5 Turbo Pro（フォールバック）
+  - Veo 3.1 Lite 720p 音声付き $0.05/秒 → 8秒 $0.40/本
+  - Kling 2.5 Turbo Pro 無音 $0.07/秒 → 5秒 $0.35/本
+  Veoの方が1秒あたり安く、環境音・効果音付きで尺も8秒取れる。
 """
 
 from __future__ import annotations
@@ -34,7 +38,9 @@ GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-2.5-flash-lite:generateContent"
 )
-KLING_MODEL = "fal-ai/kling-video/v2.5-turbo/pro/text-to-video"
+# Veo 3.1 Lite: 720p音声付き $0.05/秒（8秒=$0.40）。Kling 2.5比で安く、音声も出る。
+VIDEO_MODEL = "fal-ai/veo3.1/lite"
+FALLBACK_MODEL = "fal-ai/kling-video/v2.5-turbo/pro/text-to-video"
 FAL_QUEUE = "https://queue.fal.run"
 
 PLANNER_PROMPT = """あなたはXでバズる短尺AI動画のプランナーです。
@@ -57,7 +63,7 @@ PLANNER_PROMPT = """あなたはXでバズる短尺AI動画のプランナーで
   "fallback": false,
   "chosen_trend": "選んだトレンド語",
   "concept": "動画企画の一言説明（日本語）",
-  "kling_prompt": "Klingに送る英語プロンプト。カメラワーク・ライティング・動きを具体的に。photorealistic or cinematic。5秒で完結する1シーン。人間の顔のクローズアップは避ける",
+  "video_prompt": "動画生成AIに送る英語プロンプト。カメラワーク・ライティング・動きに加え、環境音・効果音（ambient sound / sfx）も指定する。photorealistic or cinematic。8秒で完結する1シーン。人間の顔のクローズアップは避ける",
   "tweet": "投稿文。トレンド語を自然に含め、話しかける口調で興味を引く一言＋ハッシュタグ2個（トレンド語 と #AI動画）。全体100字以内"
 }}
 """
@@ -120,29 +126,51 @@ def plan_video(trends: list[dict]) -> dict:
     return json.loads(match.group(0))
 
 
-def generate_kling_video(prompt: str, out_path: Path, duration: str = "5") -> Path:
-    """fal AI キュー経由で Kling text-to-video を実行し mp4 を保存する。"""
+def _model_arguments(model: str, prompt: str) -> dict:
+    if "veo" in model:
+        return {
+            "prompt": prompt,
+            "aspect_ratio": "9:16",
+            "duration": "8s",
+            "resolution": "720p",
+            "generate_audio": True,
+        }
+    return {  # Kling系
+        "prompt": prompt,
+        "duration": "5",
+        "aspect_ratio": "9:16",
+        "negative_prompt": "blur, distort, low quality, watermark, text, logo",
+        "cfg_scale": 0.5,
+    }
+
+
+def generate_video(prompt: str, out_path: Path) -> Path:
+    """fal AI キュー経由で text-to-video を実行し mp4 を保存する。
+
+    メインモデル（Veo 3.1 Lite）が失敗した場合は Kling にフォールバック。
+    """
     headers = {
         "Authorization": f"Key {os.environ['FAL_KEY']}",
         "Content-Type": "application/json",
     }
-    submit = requests.post(
-        f"{FAL_QUEUE}/{KLING_MODEL}",
-        headers=headers,
-        json={
-            "prompt": prompt,
-            "duration": duration,
-            "aspect_ratio": "9:16",
-            "negative_prompt": "blur, distort, low quality, watermark, text, logo",
-            "cfg_scale": 0.5,
-        },
-        timeout=30,
-    )
-    submit.raise_for_status()
-    job = submit.json()
+    job = None
+    for model in (VIDEO_MODEL, FALLBACK_MODEL):
+        submit = requests.post(
+            f"{FAL_QUEUE}/{model}",
+            headers=headers,
+            json=_model_arguments(model, prompt),
+            timeout=30,
+        )
+        if submit.ok:
+            job = submit.json()
+            print(f"[video] model: {model}")
+            break
+        print(f"[WARN] {model} submit failed: HTTP {submit.status_code} {submit.text[:200]}")
+    if job is None:
+        raise RuntimeError("all video models failed to accept the job")
     status_url = job["status_url"]
     response_url = job["response_url"]
-    print(f"[kling] queued: {job['request_id']}")
+    print(f"[video] queued: {job['request_id']}")
     deadline = time.time() + 15 * 60
     while time.time() < deadline:
         time.sleep(10)
@@ -151,10 +179,10 @@ def generate_kling_video(prompt: str, out_path: Path, duration: str = "5") -> Pa
         if state == "COMPLETED":
             break
         if state in ("FAILED", "CANCELLED"):
-            raise RuntimeError(f"kling job {state}: {status}")
-        print(f"[kling] {state} (queue={status.get('queue_position', '-')})")
+            raise RuntimeError(f"video job {state}: {status}")
+        print(f"[video] {state} (queue={status.get('queue_position', '-')})")
     else:
-        raise TimeoutError("kling generation did not finish in 15min")
+        raise TimeoutError("video generation did not finish in 15min")
     result = requests.get(response_url, headers=headers, timeout=30).json()
     video_url = result["video"]["url"]
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +191,7 @@ def generate_kling_video(prompt: str, out_path: Path, duration: str = "5") -> Pa
         with open(out_path, "wb") as f:
             for chunk in r.iter_content(1024 * 1024):
                 f.write(chunk)
-    print(f"[kling] saved: {out_path}")
+    print(f"[video] saved: {out_path}")
     return out_path
 
 
@@ -216,12 +244,13 @@ def main() -> None:
     print(f"[plan] trend: {plan.get('chosen_trend')} (fallback={plan.get('fallback')})")
     print(f"[plan] concept: {plan.get('concept')}")
     print(f"[plan] tweet: {plan.get('tweet')}")
+    prompt = plan.get("video_prompt") or plan.get("kling_prompt")
     if dry_run:
-        print(f"[plan] kling_prompt: {plan.get('kling_prompt')}")
+        print(f"[plan] video_prompt: {prompt}")
         print("----- DRY RUN: 動画生成せず終了 -----")
         return
     name = f"trend_{datetime.now():%Y%m%d_%H%M}"
-    video = generate_kling_video(plan["kling_prompt"], OUTPUT_DIR / f"{name}.mp4")
+    video = generate_video(prompt, OUTPUT_DIR / f"{name}.mp4")
     tweet_id = post_to_x(video, plan["tweet"])
     log_trend(plan, tweet_id)
     print(f"[done] posted: https://x.com/i/status/{tweet_id}")
