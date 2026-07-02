@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .DS_Store
 posted_log.json
+video_topics_log.json
+video_scripts/
