@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.rakuten.deals</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/watanabetakuya/.pyenv/shims/python3</string>
+        <string>/Users/watanabetakuya/Desktop/ファブル収益化/main.py</string>
+        <string>run</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/watanabetakuya/Desktop/ファブル収益化</string>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Hour</key><integer>7</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>17</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Hour</key><integer>20</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/Users/watanabetakuya/Desktop/ファブル収益化/logs/run.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/watanabetakuya/Desktop/ファブル収益化/logs/run.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/watanabetakuya/.pyenv/shims:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+</dict>
+</plist>

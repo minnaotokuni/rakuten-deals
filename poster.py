@@ -60,12 +60,34 @@ def make_clients() -> tuple[tweepy.Client, tweepy.API]:
     ), tweepy.API(auth)
 
 
-def post_deal(deal: Deal, dry_run: bool = False) -> str | None:
-    """1件投稿してツイートIDを返す。dry_run 時は本文表示のみ。"""
+def build_reply(runner_up: Deal | None = None) -> str:
+    """メイン投稿へのセルフリプライ（まとめサイトへの誘導）。"""
+    lines = []
+    if runner_up:
+        lines.append(
+            f"2位はこれ→【{runner_up.discount_pct:.0f}%オフ】"
+            f"{runner_up.name[:30]}… {runner_up.price:,}円"
+        )
+        lines.append(runner_up.affiliate_url)
+        lines.append("")
+    lines.append("今日の値下がり商品60選はこちら（毎日自動更新）")
+    lines.append(SITE_URL)
+    lines.append("#PR")
+    return "\n".join(lines)
+
+
+def post_deal(
+    deal: Deal,
+    runner_up: Deal | None = None,
+    dry_run: bool = False,
+) -> str | None:
+    """1件投稿してツイートIDを返す。リプ欄にサイト誘導も付ける。"""
     text = build_tweet(deal)
     if dry_run:
         print("----- DRY RUN -----")
         print(text)
+        print("----- REPLY -----")
+        print(build_reply(runner_up))
         return None
     client, api_v1 = make_clients()
     media_ids: list[str] = []
@@ -80,6 +102,14 @@ def post_deal(deal: Deal, dry_run: bool = False) -> str | None:
     resp = client.create_tweet(text=text, media_ids=media_ids or None)
     tweet_id = resp.data["id"]
     log_posted(deal, tweet_id)
+    try:
+        client.create_tweet(
+            text=build_reply(runner_up), in_reply_to_tweet_id=tweet_id
+        )
+        if runner_up:
+            log_posted(runner_up, tweet_id)
+    except Exception as e:
+        print(f"[WARN] reply failed: {e}")
     return tweet_id
 
 

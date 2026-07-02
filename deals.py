@@ -39,12 +39,50 @@ KEYWORD_POOL = [
     "プロテイン",
     "米 10kg",
     "ビール 24本",
+    # 高単価・高報酬ジャンル
+    "ふるさと納税 肉",
+    "ふるさと納税 米",
+    "マットレス",
+    "ソファ",
+    "テレビ 50インチ",
+    "ノートパソコン",
+    "タブレット",
+    "冷蔵庫",
+    "洗濯機",
 ]
+
+# 月ごとの季節キーワード（実行時の月で自動選択）
+SEASONAL_KEYWORDS: dict[int, list[str]] = {
+    1: ["福袋", "加湿器", "電気毛布", "こたつ", "スキーウェア"],
+    2: ["チョコレート ギフト", "花粉症 マスク", "空気清浄機", "新生活 家電セット"],
+    3: ["新生活 家電セット", "ランドセル", "スーツ", "炊飯器 一人暮らし"],
+    4: ["日傘", "UVカット", "レインコート", "母の日 ギフト"],
+    5: ["扇風機", "母の日 ギフト", "父の日 ギフト", "冷感 敷きパッド"],
+    6: ["除湿機", "父の日 ギフト", "日傘", "冷感 敷きパッド", "サーキュレーター"],
+    7: ["扇風機", "サーキュレーター", "冷感 敷きパッド", "うなぎ", "そうめん",
+        "日傘", "虫除け", "水着 レディース", "クーラーボックス", "お中元"],
+    8: ["ハンディファン", "冷感タオル", "浮き輪", "帰省 手土産", "防災セット"],
+    9: ["防災セット", "敬老の日 ギフト", "秋物 ジャケット", "加湿器"],
+    10: ["ハロウィン", "電気毛布", "こたつ", "加湿器", "ヒーター"],
+    11: ["ブラックフライデー", "こたつ", "ヒーター", "クリスマスプレゼント", "おせち"],
+    12: ["クリスマスプレゼント", "おせち", "福袋", "年越しそば", "カニ"],
+}
+
+
+def active_keywords() -> list[str]:
+    """定番プール + 今月の季節キーワード。"""
+    from datetime import date
+    return KEYWORD_POOL + SEASONAL_KEYWORDS.get(date.today().month, [])
 
 MIN_PRICE = 1980          # 安すぎると報酬が小さい
 MIN_REVIEWS = 50          # 信頼できる商品だけ
 MIN_RATING = 4.0
 MIN_DISCOUNT_PCT = 15.0   # 過去最高値から15%以上下がっているもののみ
+MAX_DISCOUNT_PCT = 60.0   # これ以上はバリエーション価格差の可能性が高く誇大表示になる
+
+# 「500g or 1kg」「選べるカラー」のようにページ内に複数価格帯のSKUがある商品は
+# min/max が実質の値引きではなくサイズ違いの価格差になるため除外する。
+VARIANT_NAME_PATTERN = re.compile(r"選べる|えらべる|\bor\b|よりどり|組み合わせ自由", re.IGNORECASE)
 
 
 @dataclass
@@ -75,6 +113,9 @@ def clean_name(name: str, limit: int = 45) -> str:
 
 
 def item_to_deal(item: dict, keyword: str) -> Deal | None:
+    raw_name = str(item.get("itemName") or "")
+    if VARIANT_NAME_PATTERN.search(raw_name):
+        return None
     price = int(item.get("itemPrice") or 0)
     # itemPriceMax3 = 直近集計期間の最高値。現在価格との差が実質の値引き幅。
     price_max = max(
@@ -88,7 +129,7 @@ def item_to_deal(item: dict, keyword: str) -> Deal | None:
     rating = float(item.get("reviewAverage") or 0)
     aff_url = str(item.get("affiliateUrl") or "")
     if (
-        discount < MIN_DISCOUNT_PCT
+        not MIN_DISCOUNT_PCT <= discount <= MAX_DISCOUNT_PCT
         or reviews < MIN_REVIEWS
         or rating < MIN_RATING
         or not aff_url

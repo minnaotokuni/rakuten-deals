@@ -15,17 +15,18 @@ import subprocess
 import sys
 import os
 
-from deals import KEYWORD_POOL, find_deals
-from poster import build_tweet, post_deal
+from deals import active_keywords, find_deals
+from poster import build_tweet, build_reply, post_deal
 from site_builder import write_site
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def pick_keywords(n: int = 6) -> list[str]:
-    """API呼び出し数を抑えるため、日替わりで一部キーワードだけ検索する。"""
+    """API呼び出し数を抑えるため、実行毎に一部キーワードだけ検索する。"""
+    pool = active_keywords()
     rnd = random.Random()  # 実行毎にランダム（時間帯で商品が変わる）
-    return rnd.sample(KEYWORD_POOL, n)
+    return rnd.sample(pool, min(n, len(pool)))
 
 
 def publish_site() -> None:
@@ -60,7 +61,7 @@ def cmd_scan() -> None:
 
 
 def cmd_site() -> None:
-    deals = find_deals(KEYWORD_POOL)
+    deals = find_deals(active_keywords())
     path = write_site(deals)
     print(f"[site] generated: {path} ({min(len(deals), 60)} items)")
     publish_site()
@@ -72,11 +73,16 @@ def cmd_run(dry_run: bool) -> None:
         print("[run] no deals found this time")
         return
     best = deals[0]
+    # 同一商品の別ショップ出品が2位に来がちなので、名前が明確に違うものを選ぶ
+    runner_up = next(
+        (d for d in deals[1:] if d.name[:12] != best.name[:12]), None
+    )
     print(f"[run] best deal: -{best.discount_pct}% {best.name}")
     if dry_run:
         print(build_tweet(best))
+        print(build_reply(runner_up))
         return
-    tweet_id = post_deal(best)
+    tweet_id = post_deal(best, runner_up)
     print(f"[run] posted: https://x.com/i/status/{tweet_id}")
     # サイトも同時更新（全キーワードで再検索すると重いので今回の結果を使う）
     write_site(deals)
